@@ -270,6 +270,8 @@
         const latestChart = {};
 
         var remove = function(id) {
+            if (!latestChart[id]) return;
+
             latestChart[id].dispose();
             delete latestChart[id];
 
