@@ -1,0 +1,483 @@
+<script type="text/javascript">
+    RED.editor.loadedDependentScript = RED.editor.loadedDependentScript || {};
+
+    const load = function(name,sources,options){
+        if (!sources && options.js){
+            sources = 'data:text/javascript,'+escape(options.js);
+            options.js = undefined;
+        }
+        sources = (!sources) ? [null] : (typeof sources === 'string') ? [sources] : sources
+        options = options || {}
+
+        return sources.reduce(async (memo, src) => {
+            await memo;
+            if (RED.editor.loadedDependentScript[name]) return Promise.resolve(null);
+            return new Promise(resolve=>{
+                const head = document.head || document.getElementsByTagName('head')[0];
+                const script = document.createElement('script');
+                for (const key in options) options[key] && (script[key]=options[key]);
+                if (src) {
+                    script.async = true;
+                    script.src = src;
+                    head.appendChild(script);
+                    script.onload = function(){
+                        RED.editor.loadedDependentScript[name]=true
+                        script.onerror = script.onload = null
+                        resolve(null)
+                    }
+                    script.onerror = function(){
+                        script.onerror = script.onload = null
+                        resolve(null)
+                    }
+                }else{
+                    head.appendChild(script);
+                    RED.editor.loadedDependentScript[name]=true
+                    resolve(null)
+                }
+            })
+        },null)
+    }
+
+    load('echarts',[
+        'https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js',
+        'https://unpkg.com/browse/echarts@5.5.1/dist/echarts.min.js'
+    ])
+    .then(()=>load('echarts-gl','https://cdn.jsdelivr.net/npm/echarts-gl/dist/echarts-gl.min.js'))
+    .then(()=>load('echarts-stat','https://cdn.jsdelivr.net/npm/echarts-stat@1.2.0/dist/ecStat.min.js'));
+
+    const isValidFn = function(fn){
+        try {
+            new Function(fn)()
+            return true
+        }catch(e){
+            return false
+        }
+    };
+
+    (function () {
+
+        const DEFAULT_ECHARTS_WIDTH = 200;
+        const DEFAULT_ECHARTS_HEIGHT = 160;
+        const DEFAULT_ECHARTS_OPTION = '\nreturn {}';
+
+        RED.nodes.registerType('echarts-view', {
+            category: 'output',
+            color: '#88A882',
+            defaults: {
+                name: { value: "" },
+                property: {
+                    value: "payload",
+                    required: true,
+                    validate: RED.validators.typedInput("fieldType")
+                },
+                fieldType: {value:"msg"},
+                width: {
+                    value: DEFAULT_ECHARTS_WIDTH,
+                    required: true,
+                    validate: function (v) { return !v || !isNaN(parseInt(v, 10)) }
+                },
+                height: {
+                    value: DEFAULT_ECHARTS_HEIGHT,
+                    required: true,
+                    validate: function (v) { return !v || !isNaN(parseInt(v, 10)) }
+                },
+                option: {
+                    value: DEFAULT_ECHARTS_OPTION,
+                    required: true,
+                    validate: function (v) { return !v || isValidFn(v) }
+                },
+                noerr: {
+                    value:0,
+                    required:true,
+                    validate: function(v, opt) {
+                        if (!v) {
+                            return true;
+                        }
+                        return RED._("node-red:function.error.invalid-js");
+                    }
+                },
+                active: { value: true },
+                outputs: { value: 0 }
+            },
+            inputs: 1,
+            outputs: 0,
+            icon: "font-awesome/fa-line-chart",
+            align: 'right',
+            label: function () {
+                return this.name || 'msg.'+this.property;
+            },
+            labelStyle: function () {
+                return this.name ? "node_label_italic" : "";
+            },
+            button: {
+                toggle: "active",
+                visible: function () { return true; },
+                onclick: function () {
+                    const label = this.name || "echarts view";
+                    var node = this;
+                    $.ajax({
+                        url: `echarts-view/${this.id}/${this.active ? 'enable' : 'disable'}`,
+                        type: "POST",
+                        success: function (resp, textStatus, xhr) {
+                            const historyEvent = {
+                                t: 'edit',
+                                node: node,
+                                changes: {
+                                    active: !node.active
+                                },
+                                dirty: node.dirty,
+                                changed: node.changed
+                            };
+                            node.changed = true;
+                            node.dirty = true;
+                            RED.nodes.dirty(true);
+                            RED.history.push(historyEvent);
+                            RED.view.redraw();
+                            redraw(node);
+                            if (xhr.status == 200) {
+                                RED.notify("Successfully " + resp + ": " + label, "success");
+                            }
+                        },
+                        error: function (jqXHR, textStatus, errorThrown) {
+                            var message;
+
+                            switch (jqXHR.status) {
+                                case 404:
+                                    message = "node not deployed";
+                                    break;
+                                case 0:
+                                    message = "no response from server";
+                                    break;
+                                default:
+                                    message = `unexpected error (${textStatus}) ${errorThrown}`;
+                            }
+
+                            RED.notify(`<strong>Error</strong>: ${message}`, "error");
+                        }
+                    });
+                }
+            },
+            oneditprepare: function () {
+                var that = this;
+                $('#node-input-property').typedInput({
+                    default: 'msg',
+                    typeField: $("#node-input-fieldType"),
+                    types: ['msg']
+                });
+                $('#node-input-property').typedInput('value', this.property || 'payload');
+
+                var buildEditor = function(id, stateId, focus, value, defaultValue, extraLibs, offset) {
+                    var editor = RED.editor.createEditor({
+                        id: id,
+                        mode: 'ace/mode/nrjavascript',
+                        value: value || defaultValue || "",
+                        stateId: stateId,
+                        focus: true,
+                        globals: {
+                            msg:true,
+                            context:true,
+                            RED: true,
+                            util: true,
+                            flow: true,
+                            global: true,
+                            console: true,
+                            Buffer: true,
+                            setTimeout: true,
+                            clearTimeout: true,
+                            setInterval: true,
+                            clearInterval: true
+                        },
+                        extraLibs: extraLibs
+                    });
+                    if (defaultValue && value === "") {
+                        editor.moveCursorTo(defaultValue.split("\n").length +offset, 0);
+                    }
+                    editor.__stateId = stateId;
+                    return editor;
+                }
+                this.editor = buildEditor('node-input-option-editor', this.id + "/" + "editor", true, $("#node-input-option").val(), undefined, that.libs || [], undefined, -1);
+
+                var expandButtonClickHandler = function(editor) {
+                    return function (e) {
+                        e.preventDefault();
+                        var value = editor.getValue();
+                        editor.saveView(`inside function-expandButtonClickHandler ${editor.__stateId}`);
+                        var extraLibs = that.libs || [];
+                        RED.editor.editJavaScript({
+                            value: value,
+                            width: "Infinity",
+                            stateId: editor.__stateId,
+                            mode: "ace/mode/nrjavascript",
+                            focus: true,
+                            cancel: function () {
+                                setTimeout(function () {
+                                    editor.focus();
+                                }, 250);
+                            },
+                            complete: function (v, cursor) {
+                                editor.setValue(v, -1);
+                                setTimeout(function () {
+                                    editor.restoreView();
+                                    editor.focus();
+                                }, 250);
+                            },
+                            extraLibs: extraLibs
+                        });
+                    }
+                }
+                $("#node-option-expand-js").on("click", expandButtonClickHandler(this.editor));
+                RED.popover.tooltip($("#node-option-expand-js"), RED._("node-red:common.label.expand"));
+
+            },
+            oneditsave: function() {
+                var node = this;
+                var noerr = 0;
+                $("#node-input-noerr").val(0);
+
+                var disposeEditor = function(editorName,targetName,defaultValue) {
+                    var editor = node[editorName];
+                    var annot = editor.getSession().getAnnotations();
+                    for (var k=0; k < annot.length; k++) {
+                        if (annot[k].type === "error") {
+                            noerr += annot.length;
+                            break;
+                        }
+                    }
+                    var val = editor.getValue();
+                    if (defaultValue) {
+                        if (val.trim() == defaultValue.trim()) {
+                            val = "";
+                        }
+                    }
+                    editor.destroy();
+                    delete node[editorName];
+                    $("#"+targetName).val(val);
+                }
+                disposeEditor("editor","node-input-option");
+
+                $("#node-input-noerr").val(noerr);
+                this.noerr = noerr;
+            },
+            oneditcancel: function() {
+                var node = this;
+
+                node.editor.destroy();
+                delete node.editor;
+            }
+        });
+
+        const latestData = {};
+        const latestChart = {};
+
+        var remove = function(id) {
+            latestChart[id].dispose();
+            delete latestChart[id];
+
+            const $echarts = document.getElementById(`echarts-view-output-echarts-${id}`);
+            const $bubble = document.getElementById(`echarts-view-output-bubble-${id}`);
+            
+            $bubble && $bubble.remove();
+            $echarts && $echarts.remove();
+        }
+
+        var reset = function (id) {
+            remove(id)
+            delete latestData[id];
+        }
+
+        var redraw = function (node) {
+            let id = node.id
+            remove(id);
+            if (latestData[id] && node.active) {
+                render(id, latestData[id], node);
+            }
+        }
+
+        var node_first, node_last;
+        var range_select = function () {
+            window.getSelection().removeAllRanges();
+            if (!node_first) return;
+            node_last = node_last || node_first;
+            const range = new Range();
+            if (node_first.offsetTop < node_last.offsetTop || (node_first.offsetTop === node_last.offsetTop && node_first.offsetLeft<=node_last.offsetLeft)){
+                range.setStartBefore(node_first);
+                range.setEndAfter(node_last);
+            }else{
+                range.setStartBefore(node_last);
+                range.setEndAfter(node_first);
+            }
+            window.getSelection().addRange(range);
+        }
+
+        var render = function (id, inputData, node) {
+            if(latestChart[id] && !latestChart[id].isDisposed()){
+                return latestChart[id].setOption(inputData.value)
+            }
+
+            let echartsWidth = node.width ? parseInt(node.width) : DEFAULT_ECHARTS_WIDTH;
+            let echartsHeight = node.height ? parseInt(node.height) : DEFAULT_ECHARTS_HEIGHT;
+
+            // create echarts
+            const $container = document.getElementById(id)
+            if (!$container) { return }
+
+            // build the out layer
+            const bubble = document.createElementNS("http://www.w3.org/2000/svg", 'polyline')
+            bubble.setAttribute('id', "echarts-view-output-bubble-" + id)
+            bubble.setAttribute('style', 'fill:#E8F0E8')
+            bubble.setAttribute('stroke', '#999999')
+            const box = {
+                x: 0,
+                y: 45,
+                width: echartsWidth,
+                height: echartsHeight
+            }
+
+            const left = box.x;
+            const top = box.y + 2;
+            const right = box.x + box.width;
+            const bottom = box.y + box.height;
+
+            const points =
+                `${left + 4},${top - 17} ${left + 4},${top} ` +
+                `${right},${top} ${right},${bottom} ` +
+                `${left},${bottom} ${left},${top - 21}`;
+
+            bubble.setAttribute('points', points);
+            $container.insertBefore(bubble, $container.lastChild.nextSibling)
+
+            const echartsGroup = document.createElementNS("http://www.w3.org/2000/svg", 'g');
+            echartsGroup.setAttribute('id', `echarts-view-output-echarts-${id}`);
+            $container.insertBefore(echartsGroup, $container.lastChild.nextSibling);
+
+            let d3echarts = d3.select(echartsGroup);
+
+            d3echarts.attr("transform", `translate(${4},${50})`);
+            var grid =d3echarts.append("svg")
+                .attr({"width": echartsWidth-5, "height": echartsHeight-5})
+                .attr("viewBox", [0, 0, echartsWidth-5, echartsHeight-5]);
+
+            var fo = grid.append('foreignObject')
+                .attr({
+                    'x': 0,
+                    'y': 0,
+                    'width': echartsWidth-5,
+                    'height': echartsHeight-5
+                });
+            var bd = fo.append('xhtml:div')
+                .style({
+                    "height": echartsHeight-10 + "px", 
+                    "width": echartsWidth-10 + "px",
+                    "border": "1px black solid"
+                });
+            
+            var chart = bd.append('div')
+                .style({
+                    left: '0px',
+                    top: '0px',
+                    width: '100%',
+                    height: '100%',
+                });
+
+            var nodeChart = echarts.init(chart.node());
+            latestChart[id] = nodeChart;
+
+            // 使用初始配置项和数据显示图表。
+            nodeChart.setOption(new Function(node.option)());
+            nodeChart.setOption(inputData.value);
+
+            var resizer = bd.append('div')
+                .style({
+                    position: 'absolute',
+                    width: '5px',
+                    right: '0px',
+                    height: '5px',
+                    bottom: '0px',
+                    background: 'orange',
+                    opacity: 0.9,
+                    cursor: 'pointer'
+                });
+            
+            var dragResize = d3.behavior.drag()
+                .on('drag', function() {
+                    let scale = (+document.querySelector('g.red-ui-workspace-chart-event-layer').getAttribute('transform')?.replace(/^scale\(([\d.]+)\)$/,'$1'))||1
+
+                    // Determine resizer position relative to parent
+                    let [x,y] = d3.mouse(this.parentNode);
+
+                    // Avoid negative or really small widths
+                    x = Math.max(50, x/scale);
+                    y = Math.max(50, y/scale);
+
+                    node.width = parseInt(x+10);
+                    node.height = parseInt(y+10);
+
+                    grid.attr({width:x+5, height:y+5})
+                        .attr("viewBox", [0, 0, x+5, y+5]);
+                    fo.attr({width:x+5, height:y+5});
+                    bd.style({width: x + 'px', height: y + 'px'});
+                })
+                .on("dragend", function(){
+                    redraw(node);
+                    RED.editor.updateNodeProperties(node,null)
+                    RED.editor.validateNode(node)
+                    RED.nodes.dirty(true);
+                });
+
+            resizer.call(dragResize);
+        }
+
+        RED.comms.subscribe('echarts-view', function (event, data) {
+
+            if (data.hasOwnProperty("data")) {
+                if (!latestData[data.id]) {
+                    latestData[data.id] = {};
+                }
+                let node = RED.nodes.node(data.id);
+                latestData[data.id] = data.data;
+
+                render(data.id, latestData[data.id], node);
+            } else {
+                delete latestData[data.id];
+                remove(data.id);
+            }
+        })
+    })();
+</script>
+
+<script type="text/html" data-template-name="echarts-view">
+    <input type="hidden" id="node-input-option">
+    <input type="hidden" id="node-input-noerr">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Name">
+    </div>
+    <div class="form-row">
+        <label style="padding-top: 8px" for="node-input-property"><i class="fa fa-ellipsis-h"></i> Property</label>
+        <input type="text" id="node-input-property" style="width:70%">
+        <input type="hidden" id="node-input-fieldType">
+    </div>
+    <div class="form-row">
+        <label for="node-input-height"><i class="fa fa-arrows-v"></i>&nbsp;Height</label>
+        <input type="number" id="node-input-height" style="width:125px !important">
+        &nbsp;&nbsp;<i class="fa fa-arrows-h"></i>&nbsp;Width</label>
+        <input type="number" id="node-input-width" style="width:125px !important">
+    </div>
+    <div class="form-row">
+        <label for="node-input-option"><i class="fa fa-file-code-o"></i> Initial Option</label>
+    </div>
+    <div class="form-row node-text-editor-row" style="position:relative">
+        <div style="height: 220px; min-height:150px;" class="node-text-editor" id="node-input-option-editor" ></div>
+        <div style="position: absolute; right:0; bottom: calc(100% - 20px); z-Index: 10;"><button type="button" id="node-option-expand-js" class="red-ui-button red-ui-button-small"><i class="fa fa-expand"></i></button></div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="echarts-view">
+    <p>ECharts view for previewing data in flow editor.
+    <p><strong>Height:</strong><br/>
+    The height (in pixels) of the ECharts.</p>  
+    <p><strong>Width:</strong><br/>
+    The width (in pixels) of the ECharts.</p>
+    <p><strong>Initial Option:</strong><br/>
+    The script to generate the initial option of the ECharts.</p>         
+</script>
